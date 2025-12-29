@@ -1,5 +1,5 @@
 import { LoomSettings, Node, NoteState } from "./common";
-import { App, ItemView, Menu, Modal, Setting, WorkspaceLeaf, setIcon } from "obsidian";
+import { App, ItemView, Menu, Modal, Setting, WorkspaceLeaf, setIcon, Platform, TFile, FuzzySuggestModal } from "obsidian";
 import { Range } from "@codemirror/state";
 import {
   Decoration,
@@ -9,7 +9,16 @@ import {
   PluginValue,
   WidgetType,
 } from "@codemirror/view";
-const dialog = require("electron").remote.dialog;
+
+// Mobile-compatible: Check if we're on desktop and electron is available
+let dialog: any = null;
+if (Platform.isDesktop) {
+  try {
+    dialog = require("electron").remote?.dialog;
+  } catch (e) {
+    // Electron not available, dialog remains null
+  }
+}
 
 interface NodeContext {
   app: App;
@@ -194,24 +203,37 @@ export class LoomView extends ItemView {
       "Show node borders in the editor"
     );
 
-	// the import button
-	
-	const importInput = navButtonsContainer.createEl("input", {
-	  cls: "hidden",
-	  attr: { type: "file", id: "loom__import-input" },
-	});
+	// the import button - mobile compatible
+	if (Platform.isDesktop) {
+	  // Desktop: use file input for external files
+	  const importInput = navButtonsContainer.createEl("input", {
+	    cls: "hidden",
+	    attr: { type: "file", id: "loom__import-input" },
+	  });
 
-    const importNavButton = navButtonsContainer.createEl("label", {
-      cls: "clickable-icon nav-action-button",
-      attr: { "aria-label": "Import JSON", for: "loom__import-input" },
-    });
-	setIcon(importNavButton, "import");
-	
-	importInput.addEventListener("change", () => {
-	  // @ts-expect-error
-	  const path = importInput.files?.[0].path;
-	  if (path) this.app.workspace.trigger("loom:import", path);
-	});
+      const importNavButton = navButtonsContainer.createEl("label", {
+        cls: "clickable-icon nav-action-button",
+        attr: { "aria-label": "Import JSON", for: "loom__import-input" },
+      });
+	  setIcon(importNavButton, "import");
+
+	  importInput.addEventListener("change", () => {
+	    // @ts-expect-error
+	    const path = importInput.files?.[0].path;
+	    if (path) this.app.workspace.trigger("loom:import", path);
+	  });
+	} else {
+	  // Mobile: use vault file picker modal
+	  const importNavButton = navButtonsContainer.createDiv({
+	    cls: "clickable-icon nav-action-button",
+	    attr: { "aria-label": "Import JSON from Vault" },
+	  });
+	  setIcon(importNavButton, "import");
+
+	  importNavButton.addEventListener("click", () => {
+	    new ImportModal(this.app).open();
+	  });
+	}
 
 	// the export button
 	
@@ -226,12 +248,18 @@ export class LoomView extends ItemView {
 	    this.app.workspace.trigger("loom:set-setting", "showExport", !settings.showExport);
 		return;
 	  }
-	  dialog
-	    .showSaveDialog({ title: "Export to JSON", filters: [{ extensions: ["json"] }] })
-		.then((result: any) => {
-		  if (result && result.filePath)
-		    this.app.workspace.trigger("loom:export", result.filePath);
-		});
+	  // Mobile-compatible export: use modal for vault path or electron dialog on desktop
+	  if (dialog && Platform.isDesktop) {
+	    dialog
+	      .showSaveDialog({ title: "Export to JSON", filters: [{ extensions: ["json"] }] })
+		  .then((result: any) => {
+		    if (result && result.filePath)
+		      this.app.workspace.trigger("loom:export", result.filePath);
+		  });
+	  } else {
+	    // On mobile or when electron is unavailable, use vault-based export
+	    new ExportModal(this.app).open();
+	  }
 	});
   }
 
@@ -874,5 +902,70 @@ export class MakePromptFromPassagesModal extends Modal {
 
   onClose() {
 	this.contentEl.empty();
+  }
+}
+
+// Mobile-compatible Export Modal - saves JSON to vault
+export class ExportModal extends Modal {
+  constructor(app: App) {
+    super(app);
+  }
+
+  onOpen() {
+    this.contentEl.createDiv({
+      cls: "modal-title",
+      text: "Export Loom State to Vault",
+    });
+
+    this.contentEl.createEl("p", {
+      text: "Enter a filename to save the Loom state as JSON in your vault:",
+    });
+
+    const inputContainer = this.contentEl.createDiv({ cls: "loom__export-input" });
+    const input = inputContainer.createEl("input", {
+      attr: { type: "text", placeholder: "loom-export.json" },
+      value: "loom-export.json",
+    });
+
+    const buttonContainer = this.contentEl.createDiv({
+      cls: "modal-button-container",
+    });
+    const button = buttonContainer.createEl("button", {
+      cls: "mod-cta",
+      text: "Export",
+    });
+
+    button.addEventListener("click", async () => {
+      let filename = input.value.trim();
+      if (!filename) filename = "loom-export.json";
+      if (!filename.endsWith(".json")) filename += ".json";
+
+      this.app.workspace.trigger("loom:export-to-vault", filename);
+      this.close();
+    });
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+// Mobile-compatible Import Modal - picks JSON files from vault
+export class ImportModal extends FuzzySuggestModal<TFile> {
+  constructor(app: App) {
+    super(app);
+    this.setPlaceholder("Select a JSON file to import...");
+  }
+
+  getItems(): TFile[] {
+    return this.app.vault.getFiles().filter(file => file.extension === "json");
+  }
+
+  getItemText(file: TFile): string {
+    return file.path;
+  }
+
+  onChooseItem(file: TFile, evt: MouseEvent | KeyboardEvent): void {
+    this.app.workspace.trigger("loom:import-from-vault", file.path);
   }
 }

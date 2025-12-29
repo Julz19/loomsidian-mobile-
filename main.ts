@@ -30,6 +30,7 @@ import {
   TFile,
   requestUrl,
   setIcon,
+  Platform,
 } from "obsidian";
 import { ViewPlugin } from "@codemirror/view";
 
@@ -43,10 +44,20 @@ import cl100k from "gpt-tokenizer";
 import p50k from "gpt-tokenizer/esm/model/text-davinci-003";
 import r50k from "gpt-tokenizer/esm/model/davinci";
 
-import * as fs from "fs";
 import { toRoman } from "roman-numerals";
 import { v4 as uuidv4 } from "uuid";
-const untildify = require("untildify") as any;
+
+// Desktop-only imports - only loaded on desktop platform
+let fs: typeof import("fs") | null = null;
+let untildify: any = null;
+if (Platform.isDesktop) {
+  try {
+    fs = require("fs");
+    untildify = require("untildify");
+  } catch (e) {
+    // Not available on mobile
+  }
+}
 
 type LoomSettingKey = keyof {
   [K in keyof LoomSettings]: LoomSettings[K];
@@ -1084,10 +1095,15 @@ export default class LoomPlugin extends Plugin {
 	  }))
 	);
 
+    // Desktop-only: Import from external filesystem
     this.registerEvent(
       // @ts-expect-error
       this.app.workspace.on("loom:import", (path: string) =>
         this.wftsar((file) => {
+          if (!fs || !untildify) {
+            new Notice("External file import is not available on mobile. Use Import from Vault instead.");
+            return;
+          }
           const fullPath = untildify(path);
           const data = JSON.parse(fs.readFileSync(fullPath, "utf8"));
           this.state[file.path] = data;
@@ -1098,10 +1114,15 @@ export default class LoomPlugin extends Plugin {
       )
     );
 
+    // Desktop-only: Export to external filesystem
     this.registerEvent(
       // @ts-expect-error
       this.app.workspace.on("loom:export", (path: string) =>
         this.wftsar((file) => {
+          if (!fs || !untildify) {
+            new Notice("External file export is not available on mobile. Use Export to Vault instead.");
+            return;
+          }
           const fullPath = untildify(path);
           const json = JSON.stringify(this.state[file.path], null, 2);
           fs.writeFileSync(fullPath, json);
@@ -1109,6 +1130,68 @@ export default class LoomPlugin extends Plugin {
           new Notice("Exported to " + fullPath);
         })
       )
+    );
+
+    // Mobile-compatible: Import from vault
+    this.registerEvent(
+      // @ts-expect-error
+      this.app.workspace.on("loom:import-from-vault", async (vaultPath: string) => {
+        const activeFile = this.app.workspace.getActiveFile();
+        if (!activeFile) {
+          new Notice("No active file");
+          return;
+        }
+
+        const jsonFile = this.app.vault.getAbstractFileByPath(vaultPath);
+        if (!jsonFile || !(jsonFile instanceof TFile)) {
+          new Notice("Could not find file: " + vaultPath);
+          return;
+        }
+
+        try {
+          const content = await this.app.vault.read(jsonFile);
+          const data = JSON.parse(content);
+          this.state[activeFile.path] = data;
+          this.app.workspace.trigger("loom:switch-to", data.current);
+          this.saveAndRender();
+          new Notice("Imported from " + vaultPath);
+        } catch (e) {
+          new Notice("Error importing: " + (e as Error).message);
+        }
+      })
+    );
+
+    // Mobile-compatible: Export to vault
+    this.registerEvent(
+      // @ts-expect-error
+      this.app.workspace.on("loom:export-to-vault", async (filename: string) => {
+        const activeFile = this.app.workspace.getActiveFile();
+        if (!activeFile) {
+          new Notice("No active file");
+          return;
+        }
+
+        const state = this.state[activeFile.path];
+        if (!state) {
+          new Notice("No Loom state for current file");
+          return;
+        }
+
+        try {
+          const json = JSON.stringify(state, null, 2);
+          const existingFile = this.app.vault.getAbstractFileByPath(filename);
+
+          if (existingFile && existingFile instanceof TFile) {
+            await this.app.vault.modify(existingFile, json);
+          } else {
+            await this.app.vault.create(filename, json);
+          }
+
+          new Notice("Exported to " + filename);
+        } catch (e) {
+          new Notice("Error exporting: " + (e as Error).message);
+        }
+      })
     );
 
 	this.registerEvent(
